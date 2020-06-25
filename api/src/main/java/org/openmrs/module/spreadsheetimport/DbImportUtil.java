@@ -1373,8 +1373,12 @@ public class DbImportUtil {
                         "values (?, uuid(), ?, ?, ?, ?);";
 
                 String createOrdersql = "insert into orders (date_created, uuid, creator, order_type_id, concept_id, " +
-                        "encounter_id, orderer, order_reason, urgency, order_action,date_activated, care_setting,order_number, patient_id) " +
-                        "values (?, uuid(), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);";
+                        "encounter_id, orderer, order_reason, urgency, order_action,date_activated, care_setting,order_number, patient_id, date_stopped) " +
+                        "values (?, uuid(), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);";
+
+                String createDiscOrdersql = "insert into orders (date_created, uuid, creator, order_type_id, concept_id, " +
+                        "encounter_id, orderer, order_reason, urgency, order_action,date_activated, care_setting,order_number, patient_id, auto_expire_date, previous_order_id) " +
+                        "values (?, uuid(), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);";
 
                 String createTestOrdersql = "insert into test_order (order_id) " +
                         "values (?);";
@@ -1391,8 +1395,10 @@ public class DbImportUtil {
 
                 PreparedStatement insertEncounter = conn.prepareStatement(createEncounterSql, Statement.RETURN_GENERATED_KEYS);
                 Integer orderEncounter = null;
+                Integer discEncounter = null;
 
                 PreparedStatement insertOrder = conn.prepareStatement(createOrdersql, Statement.RETURN_GENERATED_KEYS);
+                PreparedStatement insertDiscOrder = conn.prepareStatement(createDiscOrdersql, Statement.RETURN_GENERATED_KEYS);
 
                 PreparedStatement insertTestOrder = conn.prepareStatement(createTestOrdersql, Statement.RETURN_GENERATED_KEYS);
 
@@ -1411,9 +1417,11 @@ public class DbImportUtil {
                     Integer patientId = ((Long) rs.getLong("patient_id")).intValue();
                     Date encounterDate = rs.getDate("Encounter_Date");
                     String orderNumber = rs.getString("OrderNumber");
+                    String discOrderNumber = "";
                     if (StringUtils.isBlank(orderNumber)) {
                         orderNumber = "OD-P" + patientId + "C" + counter;
                     }
+                    discOrderNumber = orderNumber + "D";
                     Integer orderReason = 161236;// rs.getInt("OrderReason");
                     String urgency = rs.getString("Urgency");
                     Integer labTest = ((Long) rs.getLong("Lab_test")).intValue();
@@ -1422,6 +1430,7 @@ public class DbImportUtil {
                     Date dateTestResultReceived = rs.getDate("Date_test_result_received");
 
                     Integer order = null;
+                    Integer discOrder = null;
                     // SQL NULL is returned as 0
                     if (StringUtils.isNotBlank(testResult) && patientId != null && patientId != 0) { // handle lab result. create encounter, order, lab test, and obs for the result
                         if (StringUtils.isNotBlank(orderNumber) && dateTestResultReceived != null && dateTestRequested != null && encounterDate != null && patientId != null && (labTest != null && labTest != 0)) {
@@ -1433,6 +1442,20 @@ public class DbImportUtil {
                             if (rsGetEncounter.next()) {
                                 orderEncounter = rsGetEncounter.getInt(1);
                                 rsGetEncounter.close();
+
+                                // add discontinuation enc
+
+                                insertEncounter.setTimestamp(1, new java.sql.Timestamp(encounterDate.getTime())); // set date created
+                                insertEncounter.setInt(2, Context.getAuthenticatedUser().getId()); // set creator
+                                insertEncounter.setTimestamp(3, new java.sql.Timestamp(encounterDate.getTime()));
+                                insertEncounter.setInt(4, labMetadata.getEncounterTypeId()); // set encounter type to lab test
+                                insertEncounter.setInt(5, patientId); // set patient id
+                                insertEncounter.executeUpdate();
+                                ResultSet rsDiscEncounter = insertEncounter.getGeneratedKeys();
+                                rsDiscEncounter.next();
+                                discEncounter = rsDiscEncounter.getInt(1);
+                                rsDiscEncounter.close();
+
                             } else {
 
                                 insertEncounter.setTimestamp(1, new java.sql.Timestamp(encounterDate.getTime())); // set date created
@@ -1445,6 +1468,19 @@ public class DbImportUtil {
                                 rsNewEncounter.next();
                                 orderEncounter = rsNewEncounter.getInt(1);
                                 rsNewEncounter.close();
+
+                                // add discontinuation enc
+
+                                insertEncounter.setTimestamp(1, new java.sql.Timestamp(encounterDate.getTime())); // set date created
+                                insertEncounter.setInt(2, Context.getAuthenticatedUser().getId()); // set creator
+                                insertEncounter.setTimestamp(3, new java.sql.Timestamp(encounterDate.getTime()));
+                                insertEncounter.setInt(4, labMetadata.getEncounterTypeId()); // set encounter type to lab test
+                                insertEncounter.setInt(5, patientId); // set patient id
+                                insertEncounter.executeUpdate();
+                                ResultSet rsDiscEncounter = insertEncounter.getGeneratedKeys();
+                                rsDiscEncounter.next();
+                                discEncounter = rsDiscEncounter.getInt(1);
+                                rsDiscEncounter.close();
                             }
 
                             // create new order
@@ -1465,17 +1501,49 @@ public class DbImportUtil {
                                 insertOrder.setInt(6, 1); // set provider TODO: set provider id
                                 insertOrder.setInt(7, orderReason); // set order reason
                                 insertOrder.setString(8, "ROUTINE"); // set order urgency
-                                insertOrder.setString(9, "DISCONTINUE"); // set order action
+                                insertOrder.setString(9, "NEW"); // set order action
                                 insertOrder.setDate(10, new java.sql.Date(dateTestRequested.getTime())); // set date requested
                                 insertOrder.setInt(11, labMetadata.getCareSettingId()); // set care setting
                                 insertOrder.setString(12, orderNumber);
                                 insertOrder.setInt(13, patientId);
+                                insertOrder.setDate(14, new java.sql.Date(dateTestRequested.getTime()));
                                 insertOrder.executeUpdate();
 
                                 ResultSet rsNewOrder = insertOrder.getGeneratedKeys();
                                 rsNewOrder.next();
                                 order = rsNewOrder.getInt(1);
                                 rsNewOrder.close();
+
+                                // add discontinuation order
+
+                                insertDiscOrder.setTimestamp(1, new java.sql.Timestamp(dateTestRequested.getTime())); // set date created
+                                insertDiscOrder.setInt(2, Context.getAuthenticatedUser().getId()); // set creator
+                                insertDiscOrder.setInt(3, labMetadata.getOrderTypeId()); //
+
+                                // assign appropriate concept id
+                                if (testResult.trim().equals("LDL")) {
+                                    insertDiscOrder.setInt(4, LabOrderDetails.HIV_VIRAL_LOAD_QUALITATIVE);
+                                } else {
+                                    insertDiscOrder.setInt(4, LabOrderDetails.HIV_VIRAL_LOAD);
+                                }
+
+                                insertDiscOrder.setInt(5, discEncounter);
+                                insertDiscOrder.setInt(6, 1); // set provider TODO: set provider id
+                                insertDiscOrder.setInt(7, orderReason); // set order reason
+                                insertDiscOrder.setString(8, "ROUTINE"); // set order urgency
+                                insertDiscOrder.setString(9, "DISCONTINUE"); // set order action
+                                insertDiscOrder.setDate(10, new java.sql.Date(dateTestRequested.getTime())); // set date requested
+                                insertDiscOrder.setInt(11, labMetadata.getCareSettingId()); // set care setting
+                                insertDiscOrder.setString(12, discOrderNumber);
+                                insertDiscOrder.setInt(13, patientId);
+                                insertDiscOrder.setDate(14, new java.sql.Date(dateTestRequested.getTime()));
+                                insertDiscOrder.setInt(15, order);
+                                insertDiscOrder.executeUpdate();
+
+                                ResultSet rsDiscOrder = insertDiscOrder.getGeneratedKeys();
+                                rsDiscOrder.next();
+                                discOrder = rsDiscOrder.getInt(1);
+                                rsDiscOrder.close();
                             } else if (StringUtils.isNotBlank(testResult) && (labTest.equals(LabOrderDetails.CD4_COUNT) || labTest.equals(LabOrderDetails.CD4_PERCENT))){
                                 insertOrder.setTimestamp(1, new java.sql.Timestamp(dateTestRequested.getTime())); // set date created
                                 insertOrder.setInt(2, Context.getAuthenticatedUser().getId()); // set creator
@@ -1488,20 +1556,51 @@ public class DbImportUtil {
                                 insertOrder.setInt(6, Context.getAuthenticatedUser().getUserId()); // set provider
                                 insertOrder.setInt(7, orderReason); // set order reason
                                 insertOrder.setString(8, "ROUTINE"); // set order urgency
-                                insertOrder.setString(9, "DISCONTINUE"); // set order action
+                                insertOrder.setString(9, "NEW"); // set order action
                                 insertOrder.setDate(10, new java.sql.Date(dateTestRequested.getTime())); // set date requested
                                 insertOrder.setInt(11, labMetadata.getCareSettingId()); // set care setting
                                 insertOrder.setString(12, orderNumber);
                                 insertOrder.setInt(13, patientId);
+                                insertOrder.setDate(14, new java.sql.Date(dateTestRequested.getTime()));
                                 insertOrder.executeUpdate();
                                 ResultSet rsNewOrder = insertOrder.getGeneratedKeys();
                                 rsNewOrder.next();
                                 order = rsNewOrder.getInt(1);
                                 rsNewOrder.close();
+
+                                // add discontinuation order
+
+                                insertDiscOrder.setTimestamp(1, new java.sql.Timestamp(dateTestRequested.getTime())); // set date created
+                                insertDiscOrder.setInt(2, Context.getAuthenticatedUser().getId()); // set creator
+                                insertDiscOrder.setInt(3, labMetadata.getOrderTypeId()); //
+
+                                // assign appropriate concept id. should translate to CD4 or CD4 percent
+                                insertDiscOrder.setInt(4, labTest);
+
+                                insertDiscOrder.setInt(5, discEncounter);
+                                insertDiscOrder.setInt(6, 1); // set provider TODO: set provider id
+                                insertDiscOrder.setInt(7, orderReason); // set order reason
+                                insertDiscOrder.setString(8, "ROUTINE"); // set order urgency
+                                insertDiscOrder.setString(9, "DISCONTINUE"); // set order action
+                                insertDiscOrder.setDate(10, new java.sql.Date(dateTestRequested.getTime())); // set date requested
+                                insertDiscOrder.setInt(11, labMetadata.getCareSettingId()); // set care setting
+                                insertDiscOrder.setString(12, discOrderNumber);
+                                insertDiscOrder.setInt(13, patientId);
+                                insertDiscOrder.setDate(14, new java.sql.Date(dateTestRequested.getTime()));
+                                insertDiscOrder.setInt(15, order);
+                                insertDiscOrder.executeUpdate();
+
+                                ResultSet rsDiscOrder = insertDiscOrder.getGeneratedKeys();
+                                rsDiscOrder.next();
+                                discOrder = rsDiscOrder.getInt(1);
+                                rsDiscOrder.close();
                             }
 
                             // create lab test
                             insertTestOrder.setInt(1, order);
+                            insertTestOrder.executeUpdate();
+
+                            insertTestOrder.setInt(1, discOrder);
                             insertTestOrder.executeUpdate();
 
                             // create obs with result
@@ -1822,7 +1921,7 @@ public class DbImportUtil {
                     Integer relationshipType = ((Long) rs.getLong("Relationship")).intValue();
                     Integer openmrsRelationshipType = null;
 
-                    if (relationshipType != null) {
+                    if (relationshipType != null && relationshipType != 0) {
                         if (relationshipType.equals(1527) || relationshipType.equals(971) || relationshipType.equals(970)) {
                             openmrsRelationshipType = relMetadata.getParentChildRelationshipTypeId();
                         } else if (relationshipType.equals(972)) {
@@ -1839,7 +1938,7 @@ public class DbImportUtil {
                     }
 
 
-                    if (personA != null && personB != null && openmrsRelationshipType != null) {
+                    if (personA != null && personA != 0 && personB != null && personB != 0 && openmrsRelationshipType != null && openmrsRelationshipType != 0) {
                         addRelationshipDetails.setInt(1, Context.getAuthenticatedUser().getId()); // set creator
                         addRelationshipDetails.setInt(2, personA);
                         addRelationshipDetails.setInt(3, openmrsRelationshipType);
